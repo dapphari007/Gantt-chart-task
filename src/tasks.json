@@ -1,0 +1,27 @@
+[
+  {
+    "name": "Engine Design",
+    "start": "2025-07-11",
+    "end": "2025-07-15"
+  },
+  {
+    "name": "Armor Coating",
+    "start": "2025-07-15",
+    "end": "2025-07-18"
+  },
+  {
+    "name": "Grappling Hook Mount",
+    "start": "2025-07-18",
+    "end": "2025-08-01"
+  },
+  {
+    "name": "Drone Deployment",
+    "start": "2025-08-01",
+    "end": "2025-08-02"
+  },
+  {
+    "name": "Signal Calibration",
+    "start": "2025-08-02",
+    "end": "2025-08-06"
+  }
+]

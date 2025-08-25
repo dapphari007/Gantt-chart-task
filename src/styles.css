@@ -1,0 +1,21 @@
+.App {
+  font-family: sans-serif;
+  text-align: center;
+  padding: 20px;
+  max-width: none; /* Remove width constraint for larger charts */
+  margin: 0 auto;
+  overflow-x: auto; /* Allow horizontal scrolling if needed */
+}
+
+.help-text {
+  font-size: 14px;
+  color: #666;
+  margin: 10px 0;
+}
+
+.gantt-canvas {
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+    
