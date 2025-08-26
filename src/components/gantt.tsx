@@ -103,62 +103,57 @@ export default function Ganttchart() {
     reader.readAsArrayBuffer(file);
   };
 
-  // Resource scheduling
   const resolveResourceConflicts = (tasks: Task[]): Task[] => {
     if (tasks.length === 0) return tasks;
 
+    const tasksWithResources = tasks.filter(task => task.resource && task.resource.trim() !== "");
+
     const resourceGroups: { [resource: string]: Task[] } = {};
-    tasks.forEach((task) => {
-      if (task.resource && task.resource.trim() !== "") {
-        if (!resourceGroups[task.resource]) {
-          resourceGroups[task.resource] = [];
-        }
-        resourceGroups[task.resource].push(task);
+    tasksWithResources.forEach(task => {
+      if (!resourceGroups[task.resource!]) {
+        resourceGroups[task.resource!] = [];
       }
+      resourceGroups[task.resource!].push(task);
     });
 
     const adjustedTasks = [...tasks];
 
-    Object.keys(resourceGroups).forEach((resource) => {
-      const resourceTasks = resourceGroups[resource]
+    Object.keys(resourceGroups).forEach((chainId) => {
+      const chainTasks = resourceGroups[chainId]
         .map((task) => {
-          const taskIndex = adjustedTasks.findIndex(
-            (t) => t.id === task.id || t.name === task.name
+          const taskIndex = adjustedTasks.findIndex(t => 
+            (t.id && task.id && t.id === task.id) || 
+            (t.name === task.name && t.resource === task.resource)
           );
-          return { task: adjustedTasks[taskIndex], index: taskIndex };
+          return { task: adjustedTasks[taskIndex], index: taskIndex, originalTask: task };
         })
         .filter((item) => item.index !== -1)
-        .sort(
-          (a, b) =>
-            dayjs(a.task.start).valueOf() - dayjs(b.task.start).valueOf()
-        );
+        .sort((a, b) => {
+          if (a.originalTask.id && b.originalTask.id) {
+            return a.originalTask.id - b.originalTask.id;
+          }
+          return dayjs(a.originalTask.start).valueOf() - dayjs(b.originalTask.start).valueOf();
+        });
 
-      for (let i = 1; i < resourceTasks.length; i++) {
-        const currentTask = resourceTasks[i];
-        const previousTask = resourceTasks[i - 1];
+      const chainStartDate = dayjs(d3.min(chainTasks, (d) => dayjs(d.originalTask.start).toDate())!);
+      let currentChainDate = chainStartDate;
 
-        const currentStart = dayjs(currentTask.task.start);
-        const previousEnd = dayjs(previousTask.task.end);
+      chainTasks.forEach((taskItem, taskIndex) => {
+        const task = taskItem.task;
+        const duration = task.duration || 
+          dayjs(task.end).diff(dayjs(task.start), 'day') + 1;
+        
+        const newStart = currentChainDate;
+        const newEnd = newStart.add(Math.max(duration - 1, 0), 'day');
 
-        if (currentStart.isBefore(previousEnd.add(1, "day"))) {
-          const newStart = previousEnd.add(1, "day");
-          const duration =
-            currentTask.task.duration ||
-            dayjs(currentTask.task.end).diff(
-              dayjs(currentTask.task.start),
-              "day"
-            ) + 1;
-          const newEnd = newStart.add(Math.max(duration - 1, 0), "day");
+        adjustedTasks[taskItem.index] = {
+          ...task,
+          start: newStart.format("YYYY-MM-DD"),
+          end: newEnd.format("YYYY-MM-DD")
+        };
 
-          adjustedTasks[currentTask.index] = {
-            ...currentTask.task,
-            start: newStart.format("YYYY-MM-DD"),
-            end: newEnd.format("YYYY-MM-DD"),
-          };
-
-          resourceTasks[i].task = adjustedTasks[currentTask.index];
-        }
-      }
+        currentChainDate = newEnd.add(1, 'day');
+      });
     });
 
     return adjustedTasks;
@@ -170,8 +165,9 @@ export default function Ganttchart() {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const taskHeight = 50;
+    const resourceCount = new Set(tasks.filter(task => task.resource && task.resource.trim() !== "").map(task => task.resource)).size;
     const canvasWidth = Math.max(1000, tasks.length * 100);
-    const canvasHeight = Math.max(400, tasks.length * taskHeight + 150);
+    const canvasHeight = Math.max(400, (tasks.length + resourceCount) * taskHeight + 150);
     canvas.width = canvasWidth;
     canvas.height = canvasHeight;
     const margin = { top: 120, right: 200, bottom: 60, left: 200 };
@@ -190,13 +186,80 @@ export default function Ganttchart() {
       return;
     }
 
+    const getResourceColor = (resource: string | undefined): string => {
+      if (!resource) return "skyblue";
+      const colors = [
+        "#FF6B6B",
+        "#4ECDC4",
+        "#45B7D1",
+        "#96CEB4",
+        "#FECA57",
+        "#FF9FF3",
+        "#54A0FF",
+        "#5F27CD",
+        "#00D2D3",
+        "#FF9F43",
+        "#EA2027",
+        "#006BA6",
+        "#0652DD",
+        "#9980FA",
+        "#833471",
+      ];
+      let hash = 0;
+      for (let i = 0; i < resource.length; i++) {
+        hash = resource.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      return colors[Math.abs(hash) % colors.length];
+    };
+
+    const resourceAggregations = new Map<string, {
+      earliestStart: Date;
+      latestEnd: Date;
+      taskCount: number;
+      color: string;
+    }>();
+
+    tasks.forEach((task) => {
+      if (task.resource && task.resource.trim() !== "") {
+        const resource = task.resource;
+        const startDate = dayjs(task.start).toDate();
+        const endDate = dayjs(task.end).toDate();
+        
+        if (!resourceAggregations.has(resource)) {
+          resourceAggregations.set(resource, {
+            earliestStart: startDate,
+            latestEnd: endDate,
+            taskCount: 1,
+            color: getResourceColor(resource)
+          });
+        } else {
+          const existing = resourceAggregations.get(resource)!;
+          existing.earliestStart = startDate < existing.earliestStart ? startDate : existing.earliestStart;
+          existing.latestEnd = endDate > existing.latestEnd ? endDate : existing.latestEnd;
+          existing.taskCount++;
+        }
+      }
+    });
+
+    const yDomainItems: string[] = [];
+    const addedResourceBars = new Set<string>();
+    
+    tasks.forEach((task) => {
+      if (task.resource && task.resource.trim() !== "" && !addedResourceBars.has(task.resource)) {
+        yDomainItems.push(`📊 ${task.resource} Resource`);
+        addedResourceBars.add(task.resource);
+      }
+      yDomainItems.push(task.name);
+    });
+
     const x = d3
       .scaleTime()
       .domain([d3.timeMonth.floor(minDate), d3.timeMonth.ceil(maxDate)])
       .range([0, width]);
+    
     const y = d3
       .scaleBand()
-      .domain(tasks.map((d) => d.name))
+      .domain(yDomainItems)
       .range([0, height])
       .padding(0.2);
 
@@ -285,32 +348,6 @@ export default function Ganttchart() {
       task: Task;
     }[] = [];
 
-    const getResourceColor = (resource: string | undefined): string => {
-      if (!resource) return "skyblue";
-      const colors = [
-        "#FF6B6B",
-        "#4ECDC4",
-        "#45B7D1",
-        "#96CEB4",
-        "#FECA57",
-        "#FF9FF3",
-        "#54A0FF",
-        "#5F27CD",
-        "#00D2D3",
-        "#FF9F43",
-        "#EA2027",
-        "#006BA6",
-        "#0652DD",
-        "#9980FA",
-        "#833471",
-      ];
-      let hash = 0;
-      for (let i = 0; i < resource.length; i++) {
-        hash = resource.charCodeAt(i) + ((hash << 5) - hash);
-      }
-      return colors[Math.abs(hash) % colors.length];
-    };
-
     tasks.forEach((task, i) => {
       const startDate = dayjs(task.start).toDate();
       const endDate = dayjs(task.end).toDate();
@@ -398,10 +435,16 @@ export default function Ganttchart() {
 
       ctx.fillStyle = "black";
       ctx.fillText(text, labelX, labelY);
+    });
 
-      if (i < tasks.length - 1) {
-        const nextBarY = y(tasks[i + 1].name)! + margin.top;
-        const midY = (barY + barHeight + nextBarY) / 2;
+    yDomainItems.forEach((item, index) => {
+      if (index < yDomainItems.length - 1) {
+        const currentItemY = y(item)! + margin.top;
+        const currentItemHeight = y.bandwidth();
+        const nextItem = yDomainItems[index + 1];
+        const nextItemY = y(nextItem)! + margin.top;
+        
+        const midY = (currentItemY + currentItemHeight + nextItemY) / 2;
         ctx.strokeStyle = "#e0e0e0";
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -475,6 +518,39 @@ export default function Ganttchart() {
           ctx.restore();
         }
       }
+    });
+
+    resourceAggregations.forEach((resourceInfo, resourceName) => {
+      const resourceRowName = `📊 ${resourceName} Resource`;
+      const resourceBarY = y(resourceRowName)! + margin.top;
+      const resourceBarHeight = y.bandwidth();
+      
+      const resourceStartDate = resourceInfo.earliestStart;
+      const resourceEndDate = resourceInfo.latestEnd;
+      
+      const resourceX0 = x(resourceStartDate) + margin.left;
+      const resourceX1 = x(resourceEndDate) + margin.left;
+      const resourceBarWidth = resourceX1 - resourceX0;
+      
+      const actualResourceBarWidth = Math.max(resourceBarWidth, 1);
+      
+      ctx.fillStyle = "black";
+      ctx.fillRect(resourceX0, resourceBarY, actualResourceBarWidth, resourceBarHeight);
+      
+      ctx.strokeStyle = "#333";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(resourceX0, resourceBarY, actualResourceBarWidth, resourceBarHeight);
+      
+      ctx.textAlign = "left";
+      const resourceLabelX = resourceX1 + 8;
+      const resourceLabelY = resourceBarY + resourceBarHeight / 2;
+      
+      const totalDurationDays = (dayjs(resourceEndDate).diff(dayjs(resourceStartDate), 'day', true) + 1).toFixed(2).replace(/\.00$/, '');
+      const resourceText = `${resourceName} (${resourceInfo.taskCount} tasks) [${totalDurationDays}d total]`;
+      
+      ctx.font = "bold 12px Arial";
+      ctx.fillStyle = "black";
+      ctx.fillText(resourceText, resourceLabelX, resourceLabelY);
     });
 
     barRectsRef.current = barRects;
