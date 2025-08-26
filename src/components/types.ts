@@ -4,4 +4,6 @@ export interface Task {
   end: string;
   successors: number;
   id: number;
+  resource?: string;
+  duration?: number;
 }

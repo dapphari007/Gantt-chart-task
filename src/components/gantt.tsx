@@ -47,6 +47,8 @@ export default function Ganttchart() {
             const end = row.Finish_Date;
             const id = row.ID;
             const successors = row.Successors;
+            const resource = row["Parent Id"];
+            const totalSlack = row.Total_Slack;
 
             function excelDateToJSDate(serial: number) {
               const utc_days = Math.floor(serial - 25569);
@@ -75,6 +77,10 @@ export default function Ganttchart() {
               end: endDateStr,
               id,
               successors,
+              resource: resource ? String(resource) : undefined,
+              duration: totalSlack
+                ? parseFloat(String(totalSlack).replace("d", ""))
+                : undefined,
             };
           })
           .filter(
@@ -95,6 +101,67 @@ export default function Ganttchart() {
     };
 
     reader.readAsArrayBuffer(file);
+  };
+
+  // Resource scheduling
+  const resolveResourceConflicts = (tasks: Task[]): Task[] => {
+    if (tasks.length === 0) return tasks;
+
+    const resourceGroups: { [resource: string]: Task[] } = {};
+    tasks.forEach((task) => {
+      if (task.resource && task.resource.trim() !== "") {
+        if (!resourceGroups[task.resource]) {
+          resourceGroups[task.resource] = [];
+        }
+        resourceGroups[task.resource].push(task);
+      }
+    });
+
+    const adjustedTasks = [...tasks];
+
+    Object.keys(resourceGroups).forEach((resource) => {
+      const resourceTasks = resourceGroups[resource]
+        .map((task) => {
+          const taskIndex = adjustedTasks.findIndex(
+            (t) => t.id === task.id || t.name === task.name
+          );
+          return { task: adjustedTasks[taskIndex], index: taskIndex };
+        })
+        .filter((item) => item.index !== -1)
+        .sort(
+          (a, b) =>
+            dayjs(a.task.start).valueOf() - dayjs(b.task.start).valueOf()
+        );
+
+      for (let i = 1; i < resourceTasks.length; i++) {
+        const currentTask = resourceTasks[i];
+        const previousTask = resourceTasks[i - 1];
+
+        const currentStart = dayjs(currentTask.task.start);
+        const previousEnd = dayjs(previousTask.task.end);
+
+        if (currentStart.isBefore(previousEnd.add(1, "day"))) {
+          const newStart = previousEnd.add(1, "day");
+          const duration =
+            currentTask.task.duration ||
+            dayjs(currentTask.task.end).diff(
+              dayjs(currentTask.task.start),
+              "day"
+            ) + 1;
+          const newEnd = newStart.add(Math.max(duration - 1, 0), "day");
+
+          adjustedTasks[currentTask.index] = {
+            ...currentTask.task,
+            start: newStart.format("YYYY-MM-DD"),
+            end: newEnd.format("YYYY-MM-DD"),
+          };
+
+          resourceTasks[i].task = adjustedTasks[currentTask.index];
+        }
+      }
+    });
+
+    return adjustedTasks;
   };
 
   useEffect(() => {
@@ -218,6 +285,32 @@ export default function Ganttchart() {
       task: Task;
     }[] = [];
 
+    const getResourceColor = (resource: string | undefined): string => {
+      if (!resource) return "skyblue";
+      const colors = [
+        "#FF6B6B",
+        "#4ECDC4",
+        "#45B7D1",
+        "#96CEB4",
+        "#FECA57",
+        "#FF9FF3",
+        "#54A0FF",
+        "#5F27CD",
+        "#00D2D3",
+        "#FF9F43",
+        "#EA2027",
+        "#006BA6",
+        "#0652DD",
+        "#9980FA",
+        "#833471",
+      ];
+      let hash = 0;
+      for (let i = 0; i < resource.length; i++) {
+        hash = resource.charCodeAt(i) + ((hash << 5) - hash);
+      }
+      return colors[Math.abs(hash) % colors.length];
+    };
+
     tasks.forEach((task, i) => {
       const startDate = dayjs(task.start).toDate();
       const endDate = dayjs(task.end).toDate();
@@ -238,10 +331,11 @@ export default function Ganttchart() {
         task,
       });
 
-      ctx.fillStyle = hoveredBarIndex === i ? "#ffa500" : "skyblue";
+      const resourceColor = getResourceColor(task.resource);
+      ctx.fillStyle = hoveredBarIndex === i ? "#ffa500" : resourceColor;
       ctx.fillRect(x0, barY, actualBarWidth, barHeight);
 
-      ctx.strokeStyle = hoveredBarIndex === i ? "#ff8c00" : "#4682b4";
+      ctx.strokeStyle = hoveredBarIndex === i ? "#ff8c00" : "#333";
       ctx.lineWidth = 1;
       ctx.strokeRect(x0, barY, actualBarWidth, barHeight);
 
@@ -268,7 +362,16 @@ export default function Ganttchart() {
       ctx.textAlign = "left";
       const labelX = x1 + 8;
       const labelY = barY + barHeight / 2;
-      const text = task.name;
+
+      const durationDays = (
+        dayjs(task.end).diff(dayjs(task.start), "day", true) + 1
+      )
+        .toFixed(2)
+        .replace(/\.00$/, "");
+      const durationLabel = `${durationDays}d`;
+      const text = task.resource
+        ? `${task.name} (${task.resource}) [${durationLabel}]`
+        : `${task.name} [${durationLabel}]`;
       ctx.font = "12px Arial";
       const textMetrics = ctx.measureText(text);
       const paddingX = 0;
@@ -639,6 +742,26 @@ export default function Ganttchart() {
             marginRight: "10px",
           }}
         />
+        <button
+          onClick={() => {
+            if (tasks.length > 0) {
+              const scheduledTasks = resolveResourceConflicts(tasks);
+              setTasks(scheduledTasks);
+              console.log("Re-scheduled tasks:", scheduledTasks);
+            }
+          }}
+          style={{
+            padding: "10px 15px",
+            border: "1px solid #007bff",
+            borderRadius: "4px",
+            backgroundColor: "#007bff",
+            color: "white",
+            cursor: "pointer",
+            marginLeft: "10px",
+          }}
+        >
+          Schedule Resources
+        </button>
       </div>
       <canvas
         ref={canvasRef}
@@ -690,6 +813,21 @@ export default function Ganttchart() {
           Start: {clickedTask.start}
           <br />
           End: {clickedTask.end}
+          <br />
+          {clickedTask.resource && (
+            <>
+              Resource: {clickedTask.resource}
+              <br />
+            </>
+          )}
+          Duration:{" "}
+          {(
+            dayjs(clickedTask.end).diff(dayjs(clickedTask.start), "day", true) +
+            1
+          )
+            .toFixed(2)
+            .replace(/\.00$/, "")}
+          d<br />
         </div>
       )}
     </div>
