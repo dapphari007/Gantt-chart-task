@@ -26,6 +26,11 @@ export default function Ganttchart() {
     null
   );
   const [resizingEndIndex, setResizingEndIndex] = useState<number | null>(null);
+  
+  // Zoom state
+  const [zoomDomain, setZoomDomain] = useState<[Date, Date] | null>(null);
+  const [zoomLevel, setZoomLevel] = useState<number>(1);
+  
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     console.log(event.target.files?.[0]);
     const file = event.target.files?.[0];
@@ -144,7 +149,7 @@ export default function Ganttchart() {
           dayjs(task.end).diff(dayjs(task.start), 'day') + 1;
         
         const newStart = currentChainDate;
-        const newEnd = newStart.add(Math.max(duration - 1, 0), 'day');
+        const newEnd = newStart.add(duration - 1, 'day'); // End date is start + duration - 1
 
         adjustedTasks[taskItem.index] = {
           ...task,
@@ -152,6 +157,7 @@ export default function Ganttchart() {
           end: newEnd.format("YYYY-MM-DD")
         };
 
+        // Next task starts immediately after the current task ends (no gap)
         currentChainDate = newEnd.add(1, 'day');
       });
     });
@@ -166,11 +172,23 @@ export default function Ganttchart() {
     if (!ctx) return;
     const taskHeight = 50;
     const resourceCount = new Set(tasks.filter(task => task.resource && task.resource.trim() !== "").map(task => task.resource)).size;
-    const canvasWidth = Math.max(1000, tasks.length * 100);
+    
+    // Calculate minimum width needed for labels
+    ctx.font = "12px Arial";
+    const maxLabelWidth = Math.max(...tasks.map(task => {
+      const durationDays = (dayjs(task.end).diff(dayjs(task.start), "day", true) + 1).toFixed(2).replace(/\.00$/, "");
+      const text = task.resource 
+        ? `${task.name} (${task.resource}) [${durationDays}d]`
+        : `${task.name} [${durationDays}d]`;
+      return ctx.measureText(text).width;
+    }));
+    
+    const baseCanvasWidth = Math.max(1000, tasks.length * 100);
+    const canvasWidth = Math.max(baseCanvasWidth, baseCanvasWidth + maxLabelWidth + 100); // Extra space for labels
     const canvasHeight = Math.max(400, (tasks.length + resourceCount) * taskHeight + 150);
     canvas.width = canvasWidth;
     canvas.height = canvasHeight;
-    const margin = { top: 120, right: 200, bottom: 60, left: 200 };
+    const margin = { top: 120, right: Math.max(200, maxLabelWidth + 50), bottom: 60, left: 200 };
     const width = canvas.width - margin.left - margin.right;
     const height = canvas.height - margin.top - margin.bottom;
     const minDate = d3.min(tasks, (d) => dayjs(d.start).toDate())!;
@@ -252,9 +270,11 @@ export default function Ganttchart() {
       yDomainItems.push(task.name);
     });
 
+    // Time scale with zoom support
+    const timeExtent = zoomDomain || [d3.timeMonth.floor(minDate), d3.timeMonth.ceil(maxDate)];
     const x = d3
       .scaleTime()
-      .domain([d3.timeMonth.floor(minDate), d3.timeMonth.ceil(maxDate)])
+      .domain(timeExtent)
       .range([0, width]);
     
     const y = d3
@@ -278,65 +298,196 @@ export default function Ganttchart() {
     ctx.font = "12px";
     ctx.textBaseline = "middle";
 
-    ctx.lineWidth = 5;
+    // Draw chart boundaries (enhanced border to show zoom area)
+    ctx.strokeStyle = "#333";
+    ctx.lineWidth = 3;
     ctx.beginPath();
+    // Top border
     ctx.moveTo(margin.left, margin.top);
     ctx.lineTo(margin.left + width, margin.top);
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.moveTo(margin.left, margin.top);
+    // Right border
+    ctx.lineTo(margin.left + width, margin.top + height);
+    // Bottom border
     ctx.lineTo(margin.left, margin.top + height);
+    // Left border
+    ctx.lineTo(margin.left, margin.top);
     ctx.stroke();
 
-    const monthTicks = d3.timeMonth.range(
-      d3.timeMonth.floor(minDate),
-      d3.timeMonth.ceil(maxDate)
-    );
+    // Add subtle background to chart area
+    ctx.fillStyle = "rgba(248, 249, 250, 0.3)";
+    ctx.fillRect(margin.left, margin.top, width, height);
 
-    monthTicks.forEach((tick) => {
+    // Dynamic Time Axis Implementation
+    const [visibleStart, visibleEnd] = x.domain();
+    const spanMs = visibleEnd.getTime() - visibleStart.getTime();
+    const spanDays = spanMs / (1000 * 60 * 60 * 24);
+    const spanYears = visibleEnd.getFullYear() - visibleStart.getFullYear();
+
+    // Determine time unit and generate ticks based on zoom level
+    let ticks: Date[] = [];
+    let labelFormat: string = "";
+    let majorTicks: Date[] = [];
+    let majorLabelFormat: string = "";
+
+    if (spanMs < 1000 * 60 * 60 * 2) { // Less than 2 hours - show 15-minute intervals
+      ticks = d3.timeMinute.every(15)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "HH:mm";
+      majorTicks = d3.timeHour.every(1)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "HH:00 - DD MMM";
+    } else if (spanMs < 1000 * 60 * 60 * 12) { // Less than 12 hours - show hours
+      ticks = d3.timeHour.every(1)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "HH:00";
+      majorTicks = d3.timeDay.every(1)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "DD MMM YYYY";
+    } else if (spanMs < 1000 * 60 * 60 * 24 * 3) { // Less than 3 days - show 6-hour intervals
+      ticks = d3.timeHour.every(6)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "HH:00";
+      majorTicks = d3.timeDay.every(1)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "DD MMM YYYY";
+    } else if (spanDays < 30) { // Less than 30 days - show days
+      ticks = d3.timeDay.every(1)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "DD";
+      majorTicks = d3.timeMonth.every(1)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "MMM YYYY";
+    } else if (spanDays < 180) { // Less than 6 months - show weeks
+      ticks = d3.timeWeek.every(1)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "Week";
+      majorTicks = d3.timeMonth.every(1)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "MMM YYYY";
+    } else if (spanYears < 2) { // Less than 2 years - show months
+      ticks = d3.timeMonth.every(1)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "MMM";
+      majorTicks = d3.timeYear.every(1)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "YYYY";
+    } else if (spanYears < 10) { // Less than 10 years - show quarters
+      ticks = d3.timeMonth.every(3)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "Q";
+      majorTicks = d3.timeYear.every(1)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "YYYY";
+    } else if (spanYears < 100) { // Less than 100 years - show years
+      ticks = d3.timeYear.every(1)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "YYYY";
+      majorTicks = d3.timeYear.every(10)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "DECADE";
+    } else { // 100+ years - show decades/centuries
+      ticks = d3.timeYear.every(10)?.range(visibleStart, visibleEnd) || [];
+      labelFormat = "DECADE";
+      majorTicks = d3.timeYear.every(100)?.range(visibleStart, visibleEnd) || [];
+      majorLabelFormat = "CENTURY";
+    }
+
+    // Draw major ticks (upper level)
+    majorTicks.forEach((tick) => {
+      const tickX = x(tick) + margin.left;
+      
+      // Draw major tick line
+      ctx.strokeStyle = "#666";
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(tickX, margin.top - 15);
+      ctx.lineTo(tickX, margin.top + 15);
+      ctx.stroke();
+
+      // Format and draw major label
+      let majorText = "";
+      if (majorLabelFormat === "HH:00 - DD MMM") {
+        majorText = dayjs(tick).format("HH:00 - DD MMM");
+      } else if (majorLabelFormat === "YYYY") {
+        majorText = dayjs(tick).format("YYYY");
+      } else if (majorLabelFormat === "MMM YYYY") {
+        majorText = dayjs(tick).format("MMM YYYY");
+      } else if (majorLabelFormat === "DD MMM YYYY") {
+        majorText = dayjs(tick).format("DD MMM YYYY");
+      } else if (majorLabelFormat === "DECADE") {
+        const year = tick.getFullYear();
+        majorText = `${year}s`;
+      } else if (majorLabelFormat === "CENTURY") {
+        const year = tick.getFullYear();
+        const centuryStart = Math.floor(year / 100) * 100;
+        majorText = `[${centuryStart}, ${centuryStart + 99}]`;
+      }
+
+      ctx.save();
+      ctx.fillStyle = "#333";
+      ctx.font = "bold 18px Arial";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      
+      const textMetrics = ctx.measureText(majorText);
+      const labelPadding = 8;
+
+      ctx.fillStyle = "#f0f0f0";
+      ctx.strokeStyle = "#ccc";
+      ctx.lineWidth = 1;
+      ctx.fillRect(
+        tickX - textMetrics.width / 2 - labelPadding,
+        margin.top - 70,
+        textMetrics.width + labelPadding * 2,
+        30
+      );
+      ctx.strokeRect(
+        tickX - textMetrics.width / 2 - labelPadding,
+        margin.top - 70,
+        textMetrics.width + labelPadding * 2,
+        30
+      );
+
+      ctx.fillStyle = "#333";
+      ctx.fillText(majorText, tickX, margin.top - 55);
+      ctx.restore();
+    });
+
+    // Draw minor ticks (lower level)
+    ticks.forEach((tick) => {
       const tickX = x(tick) + margin.left;
 
+      // Draw vertical grid line
       ctx.strokeStyle = "#e0e0e0";
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(tickX, margin.top);
       ctx.lineTo(tickX, margin.top + height);
       ctx.stroke();
-      ctx.strokeStyle = "#333";
-      ctx.lineWidth = 2;
+
+      // Draw minor tick mark
+      ctx.strokeStyle = "#999";
+      ctx.lineWidth = 1;
       ctx.beginPath();
-      ctx.moveTo(tickX, margin.top - 10);
-      ctx.lineTo(tickX, margin.top + 10);
+      ctx.moveTo(tickX, margin.top - 5);
+      ctx.lineTo(tickX, margin.top + 5);
       ctx.stroke();
+
+      // Format and draw minor label
+      let minorText = "";
+      if (labelFormat === "HH:mm") {
+        minorText = dayjs(tick).format("HH:mm");
+      } else if (labelFormat === "HH:00") {
+        minorText = dayjs(tick).format("HH:00");
+      } else if (labelFormat === "HH") {
+        minorText = dayjs(tick).format("HH");
+      } else if (labelFormat === "DD") {
+        minorText = dayjs(tick).format("DD");
+      } else if (labelFormat === "Week") {
+        const weekNum = Math.ceil(dayjs(tick).date() / 7);
+        minorText = `W${weekNum}`;
+      } else if (labelFormat === "MMM") {
+        minorText = dayjs(tick).format("MMM");
+      } else if (labelFormat === "Q") {
+        const quarter = Math.ceil((dayjs(tick).month() + 1) / 3);
+        minorText = `Q${quarter}`;
+      } else if (labelFormat === "YYYY") {
+        minorText = dayjs(tick).format("YYYY");
+      } else if (labelFormat === "DECADE") {
+        const year = tick.getFullYear();
+        minorText = `${year}s`;
+      }
+
       ctx.save();
-      ctx.fillStyle = "#000";
-      ctx.font = "bold 16px Arial";
+      ctx.fillStyle = "#666";
+      ctx.font = "12px Arial";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-
-      const monthText = dayjs(tick).format("MMM YYYY");
-      const textMetrics = ctx.measureText(monthText);
-      const labelPadding = 8;
-
-      ctx.fillStyle = "#f8f9fa";
-      ctx.strokeStyle = "#dee2e6";
-      ctx.lineWidth = 1;
-      ctx.fillRect(
-        tickX - textMetrics.width / 2 - labelPadding,
-        margin.top - 50,
-        textMetrics.width + labelPadding * 2,
-        25
-      );
-      ctx.strokeRect(
-        tickX - textMetrics.width / 2 - labelPadding,
-        margin.top - 50,
-        textMetrics.width + labelPadding * 2,
-        25
-      );
-
-      ctx.fillStyle = "#000";
-      ctx.fillText(monthText, tickX, margin.top - 37);
+      ctx.fillText(minorText, tickX, margin.top - 25);
       ctx.restore();
     });
 
@@ -368,6 +519,12 @@ export default function Ganttchart() {
         task,
       });
 
+      // Set up clipping region for bars only
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(margin.left, margin.top, width, height);
+      ctx.clip();
+
       const resourceColor = getResourceColor(task.resource);
       ctx.fillStyle = hoveredBarIndex === i ? "#ffa500" : resourceColor;
       ctx.fillRect(x0, barY, actualBarWidth, barHeight);
@@ -376,7 +533,6 @@ export default function Ganttchart() {
       ctx.lineWidth = 1;
       ctx.strokeRect(x0, barY, actualBarWidth, barHeight);
 
-      ctx.save();
       ctx.beginPath();
       ctx.arc(x0, barY + barHeight / 2, 6, 0, 2 * Math.PI);
       ctx.fillStyle = "#ff6347";
@@ -411,30 +567,50 @@ export default function Ganttchart() {
         : `${task.name} [${durationLabel}]`;
       ctx.font = "12px Arial";
       const textMetrics = ctx.measureText(text);
-      const paddingX = 0;
+      const paddingX = 4;
       const paddingY = 4;
-      const rectWidth = textMetrics.width + paddingX * 2;
+      
+      // Calculate available space for the label (use chart boundary, not canvas boundary)
+      const chartRightBoundary = margin.left + width;
+      const maxLabelWidth = chartRightBoundary - labelX;
+      const rectWidth = Math.min(textMetrics.width + paddingX * 2, maxLabelWidth);
       const rectHeight = 18;
-      ctx.save();
-      ctx.fillStyle = "#f5f5f5";
-      ctx.strokeStyle = "#e0e0e0";
-      ctx.lineWidth = 1;
-      ctx.fillRect(
-        labelX - paddingX,
-        labelY - rectHeight / 2,
-        rectWidth,
-        rectHeight
-      );
-      ctx.strokeRect(
-        labelX - paddingX,
-        labelY - rectHeight / 2,
-        rectWidth,
-        rectHeight
-      );
-      ctx.restore();
+      
+      // Adjust label text if it's too long
+      let displayText = text;
+      if (textMetrics.width > maxLabelWidth - paddingX * 2) {
+        // Truncate text and add ellipsis
+        const availableTextWidth = Math.max(0, maxLabelWidth - paddingX * 2 - ctx.measureText("...").width);
+        let truncatedText = text;
+        while (ctx.measureText(truncatedText).width > availableTextWidth && truncatedText.length > 0) {
+          truncatedText = truncatedText.slice(0, -1);
+        }
+        displayText = truncatedText.length > 0 ? truncatedText + "..." : "";
+      }
+      
+      // Only draw label if there's enough space and text isn't empty
+      if (rectWidth > 30 && displayText.length > 0) { // Minimum width threshold
+        ctx.save();
+        ctx.fillStyle = "#f5f5f5";
+        ctx.strokeStyle = "#e0e0e0";
+        ctx.lineWidth = 1;
+        ctx.fillRect(
+          labelX - paddingX,
+          labelY - rectHeight / 2,
+          rectWidth,
+          rectHeight
+        );
+        ctx.strokeRect(
+          labelX - paddingX,
+          labelY - rectHeight / 2,
+          rectWidth,
+          rectHeight
+        );
+        ctx.restore();
 
-      ctx.fillStyle = "black";
-      ctx.fillText(text, labelX, labelY);
+        ctx.fillStyle = "black";
+        ctx.fillText(displayText, labelX, labelY);
+      }
     });
 
     yDomainItems.forEach((item, index) => {
@@ -458,6 +634,12 @@ export default function Ganttchart() {
       if (task.successors !== undefined && task.successors !== null) {
         const successorTask = tasks.find((t) => t.id === task.successors);
         if (successorTask) {
+          // Set up clipping region for connections
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(margin.left, margin.top, width, height);
+          ctx.clip();
+
           const startDate = dayjs(task.end).toDate();
           const x1 = x(startDate) + margin.left;
           const barY = y(task.name)! + margin.top;
@@ -534,12 +716,20 @@ export default function Ganttchart() {
       
       const actualResourceBarWidth = Math.max(resourceBarWidth, 1);
       
+      // Set up clipping region for resource bars
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(margin.left, margin.top, width, height);
+      ctx.clip();
+      
       ctx.fillStyle = "black";
       ctx.fillRect(resourceX0, resourceBarY, actualResourceBarWidth, resourceBarHeight);
       
       ctx.strokeStyle = "#333";
       ctx.lineWidth = 1;
       ctx.strokeRect(resourceX0, resourceBarY, actualResourceBarWidth, resourceBarHeight);
+      
+      ctx.restore(); // Restore clipping for resource bar
       
       ctx.textAlign = "left";
       const resourceLabelX = resourceX1 + 8;
@@ -550,11 +740,32 @@ export default function Ganttchart() {
       
       ctx.font = "bold 12px Arial";
       ctx.fillStyle = "black";
-      ctx.fillText(resourceText, resourceLabelX, resourceLabelY);
+      
+      // Calculate available space for the resource label (use chart boundary)
+      const chartRightBoundary = margin.left + width;
+      const maxResourceLabelWidth = chartRightBoundary - resourceLabelX;
+      const resourceTextMetrics = ctx.measureText(resourceText);
+      
+      // Adjust resource label text if it's too long
+      let displayResourceText = resourceText;
+      if (resourceTextMetrics.width > maxResourceLabelWidth) {
+        // Truncate text and add ellipsis
+        const availableTextWidth = Math.max(0, maxResourceLabelWidth - ctx.measureText("...").width);
+        let truncatedText = resourceText;
+        while (ctx.measureText(truncatedText).width > availableTextWidth && truncatedText.length > 0) {
+          truncatedText = truncatedText.slice(0, -1);
+        }
+        displayResourceText = truncatedText.length > 0 ? truncatedText + "..." : "";
+      }
+      
+      // Only draw label if there's enough space and text isn't empty
+      if (maxResourceLabelWidth > 50 && displayResourceText.length > 0) { // Minimum width threshold
+        ctx.fillText(displayResourceText, resourceLabelX, resourceLabelY);
+      }
     });
 
     barRectsRef.current = barRects;
-  }, [tasks, hoveredBarIndex]);
+  }, [tasks, hoveredBarIndex, zoomDomain, zoomLevel]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -745,7 +956,18 @@ export default function Ganttchart() {
           setHoveredCircle(null);
         }
       } else {
-        canvas.style.cursor = "default";
+        // Check if mouse is within chart boundaries for zoom cursor
+        const margin = { top: 120, right: 200, bottom: 60, left: 200 };
+        const width = canvas.width - margin.left - margin.right;
+        const height = canvas.height - margin.top - margin.bottom;
+        
+        if (x >= margin.left && x <= margin.left + width && 
+            y >= margin.top && y <= margin.top + height) {
+          canvas.style.cursor = "zoom-in"; // Show zoom cursor in chart area
+        } else {
+          canvas.style.cursor = "default";
+        }
+        
         isHoveringBarOrCircle = false;
         setHoveredBarIndex(null);
         setHoveredCircle(null);
@@ -792,17 +1014,98 @@ export default function Ganttchart() {
       }
     };
 
+    const handleWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      
+      const rect = canvas.getBoundingClientRect();
+      const scaleX = canvas.width / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const mouseX = (e.clientX - rect.left) * scaleX;
+      const mouseY = (e.clientY - rect.top) * scaleY;
+      
+      // Calculate chart boundaries (use same margin calculation as in chart setup)
+      const margin = { top: 120, right: 200, bottom: 60, left: 200 };
+      const width = canvas.width - margin.left - margin.right;
+      const height = canvas.height - margin.top - margin.bottom;
+      
+      // Check if mouse is within chart boundaries
+      if (mouseX < margin.left || mouseX > margin.left + width || 
+          mouseY < margin.top || mouseY > margin.top + height) {
+        return; // Don't zoom if mouse is outside chart area
+      }
+      
+      // Calculate zoom parameters
+      const minDate = d3.min(tasks, (d) => dayjs(d.start).toDate())!;
+      const maxDate = d3.max(tasks, (d) => dayjs(d.end).toDate())!;;
+      
+      // Get current domain (either zoom domain or full domain)
+      const currentDomain = zoomDomain || [d3.timeMonth.floor(minDate), d3.timeMonth.ceil(maxDate)];
+      const timeScale = d3.scaleTime().domain(currentDomain).range([0, width]);
+      
+      // Get the date at mouse position
+      const mouseDate = timeScale.invert(mouseX - margin.left);
+      
+      // Calculate gradual zoom factor based on current zoom level
+      const currentZoomLevel = zoomLevel || 1;
+      
+      // Progressive zoom factor: slower zooming at higher zoom levels
+      // Formula: zoomSpeed = baseSpeed / (1 + zoomLevel * dampingFactor)
+      const baseSpeed = 0.1; // Base zoom speed (10% per wheel tick)
+      const dampingFactor = 0.02; // How much to slow down at higher zoom levels
+      const zoomSpeed = baseSpeed / (1 + currentZoomLevel * dampingFactor);
+      
+      // Apply zoom direction with progressive speed
+      const zoomFactor = e.deltaY > 0 ? (1 + zoomSpeed) : (1 - zoomSpeed);
+      
+      // Calculate new domain
+      const currentSpan = currentDomain[1].getTime() - currentDomain[0].getTime();
+      const newSpan = currentSpan * zoomFactor;
+      
+      // Calculate mouse position ratio within current domain
+      const mouseRatio = (mouseDate.getTime() - currentDomain[0].getTime()) / currentSpan;
+      
+      // Calculate new domain bounds centered around mouse position
+      const newStartTime = mouseDate.getTime() - (newSpan * mouseRatio);
+      const newEndTime = mouseDate.getTime() + (newSpan * (1 - mouseRatio));
+      
+      const newStart = new Date(newStartTime);
+      const newEnd = new Date(newEndTime);
+      
+      // Constrain zoom to reasonable bounds
+      const originalSpan = d3.timeMonth.ceil(maxDate).getTime() - d3.timeMonth.floor(minDate).getTime();
+      const maxZoomOut = originalSpan * 1.5; // Allow zoom out to 1.5x original span
+      const minZoomIn = 1000 * 60 * 30; // Minimum 30 minutes span
+      const maxZoomLevel = 1000; // Maximum zoom level
+      
+      // Calculate new zoom level
+      const newZoomLevel = originalSpan / newSpan;
+      
+      if (newSpan > maxZoomOut) {
+        // Reset to full view if zooming out too much
+        setZoomDomain(null);
+        setZoomLevel(1);
+      } else if (newSpan < minZoomIn || newZoomLevel > maxZoomLevel) {
+        // Don't zoom in further than limits
+        return;
+      } else {
+        setZoomDomain([newStart, newEnd]);
+        setZoomLevel(newZoomLevel);
+      }
+    };
+
     canvas.addEventListener("mousemove", handleMouseMove);
     canvas.addEventListener("mousedown", handleMouseDown);
     window.addEventListener("mouseup", handleMouseUp);
     canvas.addEventListener("click", handleClick);
+    canvas.addEventListener("wheel", handleWheel);
     return () => {
       canvas.removeEventListener("mousemove", handleMouseMove);
       canvas.removeEventListener("mousedown", handleMouseDown);
       window.removeEventListener("mouseup", handleMouseUp);
       canvas.removeEventListener("click", handleClick);
+      canvas.removeEventListener("wheel", handleWheel);
     };
-  }, [draggingBarIndex, resizingStartIndex, resizingEndIndex, tasks]);
+  }, [draggingBarIndex, resizingStartIndex, resizingEndIndex, tasks, zoomDomain, zoomLevel]);
 
   return (
     <div>
@@ -838,6 +1141,32 @@ export default function Ganttchart() {
         >
           Schedule Resources
         </button>
+        <button
+          onClick={() => {
+            setZoomDomain(null);
+            setZoomLevel(1);
+          }}
+          style={{
+            padding: "10px 15px",
+            border: "1px solid #28a745",
+            borderRadius: "4px",
+            backgroundColor: "#28a745",
+            color: "white",
+            cursor: "pointer",
+            marginLeft: "10px",
+          }}
+        >
+          Reset Zoom
+        </button>
+        <div style={{ 
+          display: "inline-block", 
+          marginLeft: "15px", 
+          fontSize: "14px", 
+          color: "#666",
+          verticalAlign: "middle"
+        }}>
+          {zoomDomain ? `Zoom: ${zoomLevel < 10 ? zoomLevel.toFixed(1) : Math.round(zoomLevel)}x` : "Full View"} | Hover over chart area and use mouse wheel to zoom
+        </div>
       </div>
       <canvas
         ref={canvasRef}
